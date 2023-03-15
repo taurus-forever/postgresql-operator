@@ -63,6 +63,7 @@ bootstrap:
         archive_command: /bin/true
         {%- endif %}
         archive_mode: on
+        password_encryption: md5
         unix_socket_directories: /var/snap/charmed-postgresql/common/postgresql
         wal_level: logical
 
