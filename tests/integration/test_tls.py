@@ -87,7 +87,7 @@ async def test_tls_enabled(ops_test: OpsTest) -> None:
                 await run_command_on_unit(
                     ops_test,
                     replica,
-                    "sudo -u snap_daemon charmed-postgresql.pg-ctl -D /var/snap/charmed-postgresql/common/postgresql/pgdata/ promote",
+                    "sudo -u snap_daemon npl-charmed-postgresql.pg-ctl -D /var/snap/npl-charmed-postgresql/common/postgresql/pgdata/ promote",
                 )
 
                 # Check that the replica was promoted.
@@ -117,7 +117,7 @@ async def test_tls_enabled(ops_test: OpsTest) -> None:
         await run_command_on_unit(
             ops_test,
             primary,
-            "pkill --signal SIGKILL -f /snap/charmed-postgresql/current/usr/lib/postgresql/14/bin/postgres",
+            "pkill --signal SIGKILL -f /snap/npl-charmed-postgresql/current/usr/lib/postgresql/14/bin/postgres",
         )
         await run_command_on_unit(
             ops_test,
@@ -132,7 +132,7 @@ async def test_tls_enabled(ops_test: OpsTest) -> None:
         # Check the logs to ensure TLS is being used by pg_rewind.
         primary = await get_primary(ops_test, primary)
         logs = await run_command_on_unit(
-            ops_test, primary, "journalctl -u snap.charmed-postgresql.patroni.service"
+            ops_test, primary, "journalctl -u snap.npl-charmed-postgresql.patroni.service"
         )
         assert (
             "connection authorized: user=rewind database=postgres SSL enabled" in logs

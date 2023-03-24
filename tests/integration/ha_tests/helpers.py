@@ -16,7 +16,7 @@ from tests.integration.helpers import get_unit_address
 METADATA = yaml.safe_load(Path("./metadata.yaml").read_text())
 PORT = 5432
 APP_NAME = METADATA["name"]
-PATRONI_SERVICE_DEFAULT_PATH = "/etc/systemd/system/snap.charmed-postgresql.patroni.service"
+PATRONI_SERVICE_DEFAULT_PATH = "/etc/systemd/system/snap.npl-charmed-postgresql.patroni.service"
 TMP_SERVICE_PATH = "tests/integration/ha_tests/tmp.service"
 RESTART_DELAY = 60 * 3
 ORIGINAL_RESTART_DELAY = 30
@@ -306,7 +306,7 @@ async def get_primary(ops_test: OpsTest, app) -> str:
 async def list_wal_files(ops_test: OpsTest, app: str) -> Set:
     """Returns the list of WAL segment files in each unit."""
     units = [unit.name for unit in ops_test.model.applications[app].units]
-    command = "ls -1 /var/snap/charmed-postgresql/common/postgresql/pgdata/pg_wal/"
+    command = "ls -1 /var/snap/npl-charmed-postgresql/common/postgresql/pgdata/pg_wal/"
     files = {}
     for unit in units:
         complete_command = f"run --unit {unit} -- {command}"

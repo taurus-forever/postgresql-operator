@@ -16,7 +16,7 @@ from constants import REWIND_USER
 from tests.helpers import STORAGE_PATH
 
 PATRONI_SERVICE = "patroni"
-CREATE_CLUSTER_CONF_PATH = "/var/snap/charmed-postgresql/current/postgresql/postgresql.conf"
+CREATE_CLUSTER_CONF_PATH = "/var/snap/npl-charmed-postgresql/current/postgresql/postgresql.conf"
 
 
 # This method will be used by the mock to replace requests.get
@@ -206,7 +206,7 @@ class TestCluster(unittest.TestCase):
         self.assertEqual(mock.call_args_list[0][0], ("templates/patroni.yml.j2", "r"))
         # Ensure the correct rendered template is sent to _render_file method.
         _render_file.assert_called_once_with(
-            "/var/snap/charmed-postgresql/common/postgresql/patroni.yaml",
+            "/var/snap/npl-charmed-postgresql/common/postgresql/patroni.yaml",
             expected_content,
             0o644,
         )
@@ -220,7 +220,7 @@ class TestCluster(unittest.TestCase):
 
         # Test a success scenario.
         success = self.patroni.start_patroni()
-        _cache.__getitem__.assert_called_once_with("charmed-postgresql")
+        _cache.__getitem__.assert_called_once_with("npl-charmed-postgresql")
         _selected_snap.start.assert_called_once_with(services=[PATRONI_SERVICE])
         assert success
 

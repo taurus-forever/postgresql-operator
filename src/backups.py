@@ -490,9 +490,9 @@ Stderr:
         logger.info("Removing previous cluster information")
         return_code, _, stderr = self._execute_command(
             [
-                "charmed-postgresql.patronictl",
+                "npl-charmed-postgresql.patronictl",
                 "-c",
-                "/var/snap/charmed-postgresql/current/patroni/config.yaml",
+                "/var/snap/npl-charmed-postgresql/current/patroni/config.yaml",
                 "remove",
                 self.charm.cluster_name,
             ],
@@ -570,7 +570,7 @@ Stderr:
         )
         # Render pgBackRest config file.
         self.charm._patroni.render_file(
-            "/var/snap/charmed-postgresql/current/etc/pgbackrest.conf", rendered, 0o644
+            "/var/snap/npl-charmed-postgresql/current/etc/pgbackrest.conf", rendered, 0o644
         )
 
         return True
@@ -622,7 +622,7 @@ Stderr:
             return False
 
         snap_cache = snap.SnapCache()
-        charmed_postgresql_snap = snap_cache["charmed-postgresql"]
+        charmed_postgresql_snap = snap_cache["npl-charmed-postgresql"]
         if not charmed_postgresql_snap.present:
             logger.error("Cannot start/stop service, snap is not yet installed.")
             return False

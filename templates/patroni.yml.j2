@@ -12,7 +12,7 @@ namespace: /db/
 name: {{ member_name }}
 
 log:
-  dir: /var/snap/charmed-postgresql/common/logs
+  dir: /var/snap/npl-charmed-postgresql/common/logs
 
 restapi:
   listen: '{{ self_ip }}:8008'
@@ -56,7 +56,7 @@ bootstrap:
       remove_data_directory_on_diverged_timelines: true
       parameters:
         log_filename: 'postgresql.log'
-        log_directory: '/var/snap/charmed-postgresql/common/logs'
+        log_directory: '/var/snap/npl-charmed-postgresql/common/logs'
         logging_collector: 'on'
         synchronous_commit: on
         synchronous_standby_names: "*"
@@ -84,7 +84,7 @@ postgresql:
   listen: '{{ self_ip }}:5432'
   connect_address: '{{ self_ip }}:5432'
   # Path to PostgreSQL binaries used in the database bootstrap process.
-  bin_dir: /snap/charmed-postgresql/current/usr/lib/postgresql/{{ version }}/bin
+  bin_dir: /snap/npl-charmed-postgresql/current/usr/lib/postgresql/{{ version }}/bin
   data_dir: {{ conf_path }}/pgdata
   parameters:
     {%- if enable_pgbackrest %}
@@ -98,7 +98,7 @@ postgresql:
     ssl_cert_file: {{ conf_path }}/cert.pem
     ssl_key_file: {{ conf_path }}/key.pem
     {%- endif %}
-    unix_socket_directories: /var/snap/charmed-postgresql/common/postgresql
+    unix_socket_directories: /var/snap/npl-charmed-postgresql/common/postgresql
   pgpass: /tmp/pgpass
   pg_hba:
     - local all backup peer map=operator

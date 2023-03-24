@@ -36,7 +36,7 @@ from constants import (
 
 logger = logging.getLogger(__name__)
 
-CREATE_CLUSTER_CONF_PATH = "/var/snap/charmed-postgresql/current/postgresql/postgresql.conf"
+CREATE_CLUSTER_CONF_PATH = "/var/snap/npl-charmed-postgresql/current/postgresql/postgresql.conf"
 
 
 class NotReadyError(Exception):
@@ -130,7 +130,7 @@ class Patroni:
         self._inhibit_default_cluster_creation()
 
         # Symlink Patroni config to current
-        config_path = "/var/snap/charmed-postgresql/current/patroni/config.yaml"
+        config_path = "/var/snap/npl-charmed-postgresql/current/patroni/config.yaml"
         if os.path.isfile(config_path):
             os.remove(config_path)
         os.symlink(
@@ -138,9 +138,9 @@ class Patroni:
             config_path,
         )
         # Create the pgBackRest locks directory.
-        self._create_directory("/var/snap/charmed-postgresql/common/locks", 0o777)
+        self._create_directory("/var/snap/npl-charmed-postgresql/common/locks", 0o777)
         # Logs error out if execution permission is not set
-        self._create_directory("/var/snap/charmed-postgresql/common/logs", 0o777)
+        self._create_directory("/var/snap/npl-charmed-postgresql/common/logs", 0o777)
         # Replicas refuse to start with the default permissions
         os.chmod(self.storage_path, 0o750)
 
@@ -426,7 +426,7 @@ class Patroni:
         """
         try:
             cache = snap.SnapCache()
-            selected_snap = cache["charmed-postgresql"]
+            selected_snap = cache["npl-charmed-postgresql"]
             selected_snap.start(services=["patroni"])
             return selected_snap.services["patroni"]["active"]
         except snap.SnapError as e:
@@ -442,7 +442,7 @@ class Patroni:
         """
         try:
             cache = snap.SnapCache()
-            selected_snap = cache["charmed-postgresql"]
+            selected_snap = cache["npl-charmed-postgresql"]
             selected_snap.stop(services=["patroni"])
             running = not selected_snap.services["patroni"]["active"]
         except snap.SnapError as e:
@@ -490,7 +490,7 @@ class Patroni:
         # Get the status of the raft cluster.
         raft_status = subprocess.check_output(
             [
-                "charmed-postgresql.syncobj-admin",
+                "npl-charmed-postgresql.syncobj-admin",
                 "-conn",
                 "127.0.0.1:2222",
                 "-status",
@@ -504,7 +504,7 @@ class Patroni:
         # Remove the member from the raft cluster.
         result = subprocess.check_output(
             [
-                "charmed-postgresql.syncobj-admin",
+                "npl-charmed-postgresql.syncobj-admin",
                 "-conn",
                 "127.0.0.1:2222",
                 "-remove",

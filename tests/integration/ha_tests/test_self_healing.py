@@ -36,7 +36,7 @@ from tests.integration.helpers import (
 
 APP_NAME = METADATA["name"]
 PATRONI_PROCESS = "/usr/bin/patroni"
-POSTGRESQL_PROCESS = "/snap/charmed-postgresql/current/usr/lib/postgresql/14/bin/postgres"
+POSTGRESQL_PROCESS = "/snap/npl-charmed-postgresql/current/usr/lib/postgresql/14/bin/postgres"
 DB_PROCESSES = [POSTGRESQL_PROCESS, PATRONI_PROCESS]
 
 
