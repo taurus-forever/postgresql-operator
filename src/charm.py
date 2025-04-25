@@ -16,6 +16,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, get_args
+from urllib.parse import urlparse
 
 import psycopg2
 from charms.data_platform_libs.v0.data_interfaces import DataPeerData, DataPeerUnitData
@@ -23,6 +24,8 @@ from charms.data_platform_libs.v0.data_models import TypedCharmBase
 from charms.grafana_agent.v0.cos_agent import COSAgentProvider, charm_tracing_config
 from charms.operator_libs_linux.v2 import snap
 from charms.postgresql_k8s.v0.postgresql import (
+    ACCESS_GROUP_IDENTITY,
+    ACCESS_GROUPS,
     REQUIRED_PLUGINS,
     PostgreSQL,
     PostgreSQLCreateUserError,
@@ -41,6 +44,7 @@ from ops.charm import (
     InstallEvent,
     LeaderElectedEvent,
     RelationDepartedEvent,
+    SecretChangedEvent,
     StartEvent,
 )
 from ops.framework import EventBase
@@ -50,6 +54,7 @@ from ops.model import (
     MaintenanceStatus,
     ModelError,
     Relation,
+    SecretNotFoundError,
     Unit,
     WaitingStatus,
 )
@@ -72,6 +77,7 @@ from constants import (
     APP_SCOPE,
     BACKUP_USER,
     DATABASE_DEFAULT_NAME,
+    DATABASE_PORT,
     METRICS_PORT,
     MONITORING_PASSWORD_KEY,
     MONITORING_SNAP_SERVICE,
@@ -95,9 +101,11 @@ from constants import (
     TLS_KEY_FILE,
     TRACING_PROTOCOL,
     UNIT_SCOPE,
+    UPDATE_CERTS_BIN_PATH,
     USER,
     USER_PASSWORD_KEY,
 )
+from ldap import PostgreSQLLDAP
 from relations.async_replication import (
     REPLICATION_CONSUMER_RELATION,
     REPLICATION_OFFER_RELATION,
@@ -106,7 +114,7 @@ from relations.async_replication import (
 from relations.postgresql_provider import PostgreSQLProvider
 from rotate_logs import RotateLogs
 from upgrade import PostgreSQLUpgrade, get_postgresql_dependencies_model
-from utils import new_password
+from utils import new_password, snap_refreshed
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +139,7 @@ class CannotConnectError(Exception):
         PostgreSQL,
         PostgreSQLAsyncReplication,
         PostgreSQLBackups,
+        PostgreSQLLDAP,
         PostgreSQLProvider,
         PostgreSQLTLS,
         PostgreSQLUpgrade,
@@ -180,14 +189,15 @@ class PostgresqlOperatorCharm(TypedCharmBase[CharmConfig]):
         self.framework.observe(self.on.get_primary_action, self._on_get_primary)
         self.framework.observe(self.on[PEER].relation_changed, self._on_peer_relation_changed)
         self.framework.observe(self.on.secret_changed, self._on_peer_relation_changed)
+        # add specific handler for updated system-user secrets
+        self.framework.observe(self.on.secret_changed, self._on_secret_changed)
         self.framework.observe(self.on[PEER].relation_departed, self._on_peer_relation_departed)
         self.framework.observe(self.on.start, self._on_start)
-        self.framework.observe(self.on.get_password_action, self._on_get_password)
-        self.framework.observe(self.on.set_password_action, self._on_set_password)
         self.framework.observe(self.on.promote_to_primary_action, self._on_promote_to_primary)
         self.framework.observe(self.on.update_status, self._on_update_status)
         self.cluster_name = self.app.name
         self._member_name = self.unit.name.replace("/", "-")
+        self._certs_path = "/usr/local/share/ca-certificates"
         self._storage_path = self.meta.storages["data"].location
 
         self.upgrade = PostgreSQLUpgrade(
@@ -198,6 +208,7 @@ class PostgresqlOperatorCharm(TypedCharmBase[CharmConfig]):
         )
         self.postgresql_client_relation = PostgreSQLProvider(self)
         self.backup = PostgreSQLBackups(self, "s3-parameters")
+        self.ldap = PostgreSQLLDAP(self, "ldap")
         self.tls = PostgreSQLTLS(self, PEER)
         self.async_replication = PostgreSQLAsyncReplication(self)
         self.restart_manager = RollingOpsManager(
@@ -327,6 +338,25 @@ class PostgresqlOperatorCharm(TypedCharmBase[CharmConfig]):
             return None
         secret_key = self._translate_field_to_secret_key(key)
         self.peer_relation_data(scope).delete_relation_data(peers.id, [secret_key])
+
+    def get_secret_from_id(self, secret_id: str) -> dict[str, str]:
+        """Resolve the given id of a Juju secret and return the content as a dict.
+
+        This method can be used to retrieve any secret, not just those used via the peer relation.
+        If the secret is not owned by the charm, it has to be granted access to it.
+
+        Args:
+            secret_id (str): The id of the secret.
+
+        Returns:
+            dict: The content of the secret.
+        """
+        try:
+            secret_content = self.model.get_secret(id=secret_id).get_content(refresh=True)
+        except (SecretNotFoundError, ModelError):
+            raise
+
+        return secret_content
 
     @property
     def is_cluster_initialised(self) -> bool:
@@ -718,6 +748,17 @@ class PostgresqlOperatorCharm(TypedCharmBase[CharmConfig]):
 
         self._update_new_unit_status()
 
+    def _on_secret_changed(self, event: SecretChangedEvent) -> None:
+        """Handle the secret_changed event."""
+        if not self.unit.is_leader():
+            return
+
+        if (admin_secret_id := self.config.system_users) and admin_secret_id == event.secret.id:
+            try:
+                self._update_admin_password(admin_secret_id)
+            except PostgreSQLUpdateUserPasswordError:
+                event.defer()
+
     # Split off into separate function, because of complexity _on_peer_relation_changed
     def _start_stop_pgbackrest_service(self, event: HookEvent) -> None:
         # Start or stop the pgBackRest TLS server service when TLS certificate change.
@@ -893,6 +934,21 @@ class PostgresqlOperatorCharm(TypedCharmBase[CharmConfig]):
         )
 
     @property
+    def is_connectivity_enabled(self) -> bool:
+        """Return whether this unit can be connected externally."""
+        return self.unit_peer_data.get("connectivity", "on") == "on"
+
+    @property
+    def is_ldap_charm_related(self) -> bool:
+        """Return whether this unit has an LDAP charm related."""
+        return self.app_peer_data.get("ldap_enabled", "False") == "True"
+
+    @property
+    def is_ldap_enabled(self) -> bool:
+        """Return whether this unit has LDAP enabled."""
+        return self.is_ldap_charm_related and self.is_cluster_initialised
+
+    @property
     def is_primary(self) -> bool:
         """Return whether this unit is the primary instance."""
         return self.unit.name == self._patroni.get_primary(unit_name_pattern=True)
@@ -1040,16 +1096,27 @@ class PostgresqlOperatorCharm(TypedCharmBase[CharmConfig]):
         # This is needed due to https://bugs.launchpad.net/snapd/+bug/2011581.
         try:
             # Input is hardcoded
-            subprocess.check_call("mkdir -p /home/snap_daemon".split())  # noqa: S603
-            subprocess.check_call("chown snap_daemon:snap_daemon /home/snap_daemon".split())  # noqa: S603
-            subprocess.check_call("usermod -d /home/snap_daemon snap_daemon".split())  # noqa: S603
+            subprocess.check_call(["mkdir", "-p", "/home/snap_daemon"])  # noqa: S607
+            subprocess.check_call(["chown", "snap_daemon:snap_daemon", "/home/snap_daemon"])  # noqa: S607
+            subprocess.check_call(["usermod", "-d", "/home/snap_daemon", "snap_daemon"])  # noqa: S607
         except subprocess.CalledProcessError:
             logger.exception("Unable to create snap_daemon home dir")
 
         self.unit.status = WaitingStatus("waiting to start PostgreSQL")
 
-    def _on_leader_elected(self, event: LeaderElectedEvent) -> None:
+    def _on_leader_elected(self, event: LeaderElectedEvent) -> None:  # noqa: C901
         """Handle the leader-elected event."""
+        # consider configured system user passwords
+        system_user_passwords = {}
+        if admin_secret_id := self.config.system_users:
+            try:
+                system_user_passwords = self.get_secret_from_id(secret_id=admin_secret_id)
+            except (ModelError, SecretNotFoundError) as e:
+                # only display the error but don't return to make sure all users have passwords
+                logger.error(f"Error setting internal passwords: {e}")
+                self.unit.status = BlockedStatus("Password setting for system users failed.")
+                event.defer()
+
         # The leader sets the needed passwords if they weren't set before.
         for key in (
             USER_PASSWORD_KEY,
@@ -1060,7 +1127,14 @@ class PostgresqlOperatorCharm(TypedCharmBase[CharmConfig]):
             PATRONI_PASSWORD_KEY,
         ):
             if self.get_secret(APP_SCOPE, key) is None:
-                self.set_secret(APP_SCOPE, key, new_password())
+                if key in system_user_passwords:
+                    # use provided passwords for system-users if available
+                    self.set_secret(APP_SCOPE, key, system_user_passwords[key])
+                    logger.info(f"Using configured password for {key}")
+                else:
+                    # generate a password for this user if not provided
+                    self.set_secret(APP_SCOPE, key, new_password())
+                    logger.info(f"Generated new password for {key}")
 
         if self.has_raft_keys():
             self._raft_reinitialisation()
@@ -1133,6 +1207,12 @@ class PostgresqlOperatorCharm(TypedCharmBase[CharmConfig]):
 
         # Enable and/or disable the extensions.
         self.enable_disable_extensions()
+
+        if admin_secret_id := self.config.system_users:
+            try:
+                self._update_admin_password(admin_secret_id)
+            except PostgreSQLUpdateUserPasswordError:
+                event.defer()
 
     def enable_disable_extensions(self, database: str | None = None) -> None:
         """Enable/disable PostgreSQL extensions set through config options.
@@ -1264,28 +1344,88 @@ class PostgresqlOperatorCharm(TypedCharmBase[CharmConfig]):
             self._patroni.start_patroni()
             self.backup.start_stop_pgbackrest_service()
 
-    def _setup_exporter(self) -> None:
-        """Set up postgresql_exporter options."""
-        cache = snap.SnapCache()
-        postgres_snap = cache[POSTGRESQL_SNAP_NAME]
+    def _restart_metrics_service(self, postgres_snap: snap.Snap) -> None:
+        """Restart the monitoring service if the password was rotated."""
+        try:
+            snap_password = postgres_snap.get("exporter.password")
+        except snap.SnapError:
+            logger.warning("Early exit: Trying to reset metrics service with no configuration set")
+            return None
 
-        if postgres_snap.revision != next(
-            filter(lambda snap_package: snap_package[0] == POSTGRESQL_SNAP_NAME, SNAP_PACKAGES)
-        )[1]["revision"].get(platform.machine()):
-            logger.debug(
-                "Early exit _setup_exporter: snap was not refreshed to the right version yet"
-            )
+        if snap_password != self.get_secret(APP_SCOPE, MONITORING_PASSWORD_KEY):
+            self._setup_exporter(postgres_snap)
+
+    def _restart_ldap_sync_service(self, postgres_snap: snap.Snap) -> None:
+        """Restart the LDAP sync service in case any configuration changed."""
+        if not self._patroni.member_started:
+            logger.debug("Restart LDAP sync early exit: Patroni has not started yet")
             return
+
+        sync_service = postgres_snap.services["ldap-sync"]
+
+        if not self.is_primary and sync_service["active"]:
+            logger.debug("Stopping LDAP sync service. It must only run in the primary")
+            postgres_snap.stop(services=["ldap-sync"])
+
+        if self.is_primary and not self.is_ldap_enabled:
+            logger.debug("Stopping LDAP sync service")
+            postgres_snap.stop(services=["ldap-sync"])
+            return
+
+        if self.is_primary and self.is_ldap_enabled:
+            self._setup_ldap_sync(postgres_snap)
+
+    def _setup_exporter(self, postgres_snap: snap.Snap | None = None) -> None:
+        """Set up postgresql_exporter options."""
+        if postgres_snap is None:
+            cache = snap.SnapCache()
+            postgres_snap = cache[POSTGRESQL_SNAP_NAME]
 
         postgres_snap.set({
             "exporter.user": MONITORING_USER,
             "exporter.password": self.get_secret(APP_SCOPE, MONITORING_PASSWORD_KEY),
         })
+
         if postgres_snap.services[MONITORING_SNAP_SERVICE]["active"] is False:
             postgres_snap.start(services=[MONITORING_SNAP_SERVICE], enable=True)
         else:
             postgres_snap.restart(services=[MONITORING_SNAP_SERVICE])
+
         self.unit_peer_data.update({"exporter-started": "True"})
+
+    def _setup_ldap_sync(self, postgres_snap: snap.Snap | None = None) -> None:
+        """Set up postgresql_ldap_sync options."""
+        if postgres_snap is None:
+            cache = snap.SnapCache()
+            postgres_snap = cache[POSTGRESQL_SNAP_NAME]
+
+        ldap_params = self.get_ldap_parameters()
+        ldap_url = urlparse(ldap_params["ldapurl"])
+        ldap_host = ldap_url.hostname
+        ldap_port = ldap_url.port
+
+        ldap_base_dn = ldap_params["ldapbasedn"]
+        ldap_bind_username = ldap_params["ldapbinddn"]
+        ldap_bind_password = ldap_params["ldapbindpasswd"]
+        ldap_group_mappings = self.postgresql.build_postgresql_group_map(self.config.ldap_map)
+
+        postgres_snap.set({
+            "ldap-sync.ldap_host": ldap_host,
+            "ldap-sync.ldap_port": ldap_port,
+            "ldap-sync.ldap_base_dn": ldap_base_dn,
+            "ldap-sync.ldap_bind_username": ldap_bind_username,
+            "ldap-sync.ldap_bind_password": ldap_bind_password,
+            "ldap-sync.ldap_group_identity": json.dumps(ACCESS_GROUP_IDENTITY),
+            "ldap-sync.ldap_group_mappings": json.dumps(ldap_group_mappings),
+            "ldap-sync.postgres_host": "127.0.0.1",
+            "ldap-sync.postgres_port": DATABASE_PORT,
+            "ldap-sync.postgres_database": DATABASE_DEFAULT_NAME,
+            "ldap-sync.postgres_username": USER,
+            "ldap-sync.postgres_password": self._get_password(),
+        })
+
+        logger.debug("Starting LDAP sync service")
+        postgres_snap.restart(services=["ldap-sync"])
 
     def _start_primary(self, event: StartEvent) -> None:
         """Bootstrap the cluster."""
@@ -1330,6 +1470,11 @@ class PostgresqlOperatorCharm(TypedCharmBase[CharmConfig]):
 
         self.postgresql.set_up_database(temp_location="/var/snap/charmed-postgresql/common/temp")
 
+        access_groups = self.postgresql.list_access_groups()
+        if access_groups != set(ACCESS_GROUPS):
+            self.postgresql.create_access_groups()
+            self.postgresql.grant_internal_access_group_memberships()
+
         self.postgresql_client_relation.oversee_users()
 
         # Set the flag to enable the replicas to start the Patroni service.
@@ -1362,57 +1507,21 @@ class PostgresqlOperatorCharm(TypedCharmBase[CharmConfig]):
         # Configure Patroni in the replica but don't start it yet.
         self._patroni.configure_patroni_on_unit()
 
-    def _on_get_password(self, event: ActionEvent) -> None:
-        """Returns the password for a user as an action response.
-
-        If no user is provided, the password of the operator user is returned.
-        """
-        username = event.params.get("username", USER)
-        if username not in PASSWORD_USERS:
-            event.fail(
-                f"The action can be run only for users used by the charm or Patroni:"
-                f" {', '.join(PASSWORD_USERS)} not {username}"
-            )
-            return
-        event.set_results({"password": self.get_secret(APP_SCOPE, f"{username}-password")})
-
-    def _on_set_password(self, event: ActionEvent) -> None:
-        """Set the password for the specified user."""
-        # Only leader can write the new password into peer relation.
-        if not self.unit.is_leader():
-            event.fail("The action can be run only on leader unit")
-            return
-
-        username = event.params.get("username", USER)
-        if username not in SYSTEM_USERS:
-            event.fail(
-                f"The action can be run only for users used by the charm:"
-                f" {', '.join(SYSTEM_USERS)} not {username}"
-            )
-            return
-
-        password = event.params.get("password", new_password())
-
-        if password == self.get_secret(APP_SCOPE, f"{username}-password"):
-            event.log("The old and new passwords are equal.")
-            event.set_results({"password": password})
-            return
-
-        # Ensure all members are ready before trying to reload Patroni
-        # configuration to avoid errors (like the API not responding in
-        # one instance because PostgreSQL and/or Patroni are not ready).
+    def _update_admin_password(self, admin_secret_id: str) -> None:
+        """Check if the password of a system user was changed and update it in the database."""
         if not self._patroni.are_all_members_ready():
-            event.fail(
+            # Ensure all members are ready before reloading Patroni configuration to avoid errors
+            # e.g. API not responding in one instance because PostgreSQL / Patroni are not ready
+            raise PostgreSQLUpdateUserPasswordError(
                 "Failed changing the password: Not all members healthy or finished initial sync."
             )
-            return
 
         replication_offer_relation = self.model.get_relation(REPLICATION_OFFER_RELATION)
+        other_cluster_primary_ip = ""
         if (
             replication_offer_relation is not None
             and not self.async_replication.is_primary_cluster()
         ):
-            # Update the password in the other cluster PostgreSQL primary instance.
             other_cluster_endpoints = self.async_replication.get_all_primary_cluster_endpoints()
             other_cluster_primary = self._patroni.get_primary(
                 alternative_endpoints=other_cluster_endpoints
@@ -1422,36 +1531,50 @@ class PostgresqlOperatorCharm(TypedCharmBase[CharmConfig]):
                 for unit in replication_offer_relation.units
                 if unit.name.replace("/", "-") == other_cluster_primary
             )
-            try:
-                self.postgresql.update_user_password(
-                    username, password, database_host=other_cluster_primary_ip
-                )
-            except PostgreSQLUpdateUserPasswordError as e:
-                logger.exception(e)
-                event.fail("Failed changing the password.")
-                return
         elif self.model.get_relation(REPLICATION_CONSUMER_RELATION) is not None:
-            event.fail(
-                "Failed changing the password: This action can be ran only in the cluster from the offer side."
+            logger.error(
+                "Failed changing the password: This can be ran only in the cluster from the offer side."
             )
+            self.unit.status = BlockedStatus("Password update for system users failed.")
             return
-        else:
-            # Update the password in this cluster PostgreSQL primary instance.
-            try:
-                self.postgresql.update_user_password(username, password)
-            except PostgreSQLUpdateUserPasswordError as e:
-                logger.exception(e)
-                event.fail("Failed changing the password.")
-                return
 
-        # Update the password in the secret store.
-        self.set_secret(APP_SCOPE, f"{username}-password", password)
+        try:
+            # get the secret content and check each user configured there
+            # only SYSTEM_USERS with changed passwords are processed, all others ignored
+            updated_passwords = self.get_secret_from_id(secret_id=admin_secret_id)
+            for user, password in list(updated_passwords.items()):
+                if user not in SYSTEM_USERS:
+                    logger.error(
+                        f"Can only update system users: {', '.join(SYSTEM_USERS)} not {user}"
+                    )
+                    updated_passwords.pop(user)
+                    continue
+                if password == self.get_secret(APP_SCOPE, f"{user}-password"):
+                    updated_passwords.pop(user)
+        except (ModelError, SecretNotFoundError) as e:
+            logger.error(f"Error updating internal passwords: {e}")
+            self.unit.status = BlockedStatus("Password update for system users failed.")
+            return
+
+        try:
+            # perform the actual password update for the remaining users
+            for user, password in updated_passwords.items():
+                logger.info(f"Updating password for user {user}")
+                self.postgresql.update_user_password(
+                    user,
+                    password,
+                    database_host=other_cluster_primary_ip if other_cluster_primary_ip else None,
+                )
+                # Update the password in the secret store after updating it in the database
+                self.set_secret(APP_SCOPE, f"{user}-password", password)
+        except PostgreSQLUpdateUserPasswordError as e:
+            logger.exception(e)
+            self.unit.status = BlockedStatus("Password update for system users failed.")
+            return
 
         # Update and reload Patroni configuration in this unit to use the new password.
         # Other units Patroni configuration will be reloaded in the peer relation changed event.
         self.update_config()
-
-        event.set_results({"password": password})
 
     def _on_promote_to_primary(self, event: ActionEvent) -> None:
         if event.params.get("scope") == "cluster":
@@ -1767,6 +1890,33 @@ class PostgresqlOperatorCharm(TypedCharmBase[CharmConfig]):
             logger.exception("TLS files failed to push. Error in config update")
             return False
 
+    def push_ca_file_into_workload(self, secret_name: str) -> bool:
+        """Move CA certificates file into the PostgreSQL storage path."""
+        certs = self.get_secret(UNIT_SCOPE, secret_name)
+        if certs is not None:
+            certs_file = Path(self._certs_path, f"{secret_name}.crt")
+            certs_file.write_text(certs)
+            subprocess.check_call([UPDATE_CERTS_BIN_PATH])  # noqa: S603
+
+        try:
+            return self.update_config()
+        except Exception:
+            logger.exception("CA file failed to push. Error in config update")
+            return False
+
+    def clean_ca_file_from_workload(self, secret_name: str) -> bool:
+        """Cleans up CA certificates from the PostgreSQL storage path."""
+        certs_file = Path(self._certs_path, f"{secret_name}.crt")
+        certs_file.unlink()
+
+        subprocess.check_call([UPDATE_CERTS_BIN_PATH])  # noqa: S603
+
+        try:
+            return self.update_config()
+        except Exception:
+            logger.exception("CA file failed to clean. Error in config update")
+            return False
+
     def _reboot_on_detached_storage(self, event: EventBase) -> None:
         """Reboot on detached storage.
 
@@ -1779,8 +1929,7 @@ class PostgresqlOperatorCharm(TypedCharmBase[CharmConfig]):
         logger.error("Data directory not attached. Reboot unit.")
         self.unit.status = WaitingStatus("Data directory not attached")
         with contextlib.suppress(subprocess.CalledProcessError):
-            # Call is constant
-            subprocess.check_call(["/usr/bin/systemctl", "reboot"])  # noqa: S603
+            subprocess.check_call(["/usr/bin/systemctl", "reboot"])
 
     def _restart(self, event: RunWithLock) -> None:
         """Restart PostgreSQL."""
@@ -1845,8 +1994,9 @@ class PostgresqlOperatorCharm(TypedCharmBase[CharmConfig]):
 
         # Update and reload configuration based on TLS files availability.
         self._patroni.render_patroni_yml_file(
-            connectivity=self.unit_peer_data.get("connectivity", "on") == "on",
+            connectivity=self.is_connectivity_enabled,
             is_creating_backup=is_creating_backup,
+            enable_ldap=self.is_ldap_enabled,
             enable_tls=enable_tls,
             backup_id=self.app_peer_data.get("restoring-backup"),
             pitr_target=self.app_peer_data.get("restore-to-time"),
@@ -1900,19 +2050,15 @@ class PostgresqlOperatorCharm(TypedCharmBase[CharmConfig]):
 
         self._handle_postgresql_restart_need(enable_tls)
 
-        # Restart the monitoring service if the password was rotated
         cache = snap.SnapCache()
         postgres_snap = cache[POSTGRESQL_SNAP_NAME]
 
-        try:
-            snap_password = postgres_snap.get("exporter.password")
-        except snap.SnapError:
-            logger.warning(
-                "Early exit update_config: Trying to reset metrics service with no configuration set"
-            )
+        if not snap_refreshed(postgres_snap.revision):
+            logger.debug("Early exit: snap was not refreshed to the right version yet")
             return True
-        if snap_password != self.get_secret(APP_SCOPE, MONITORING_PASSWORD_KEY):
-            self._setup_exporter()
+
+        self._restart_metrics_service(postgres_snap)
+        self._restart_ldap_sync_service(postgres_snap)
 
         return True
 
@@ -1925,6 +2071,9 @@ class PostgresqlOperatorCharm(TypedCharmBase[CharmConfig]):
             raise ValueError(
                 "instance_default_text_search_config config option has an invalid value"
             )
+
+        if not self.postgresql.validate_group_map(self.config.ldap_map):
+            raise ValueError("ldap_map config option has an invalid value")
 
         if not self.postgresql.validate_date_style(self.config.request_date_style):
             raise ValueError("request_date_style config option has an invalid value")
@@ -2116,6 +2265,35 @@ class PostgresqlOperatorCharm(TypedCharmBase[CharmConfig]):
             for ext in SPI_MODULE:
                 plugins.append(ext)
         return plugins
+
+    def get_ldap_parameters(self) -> dict:
+        """Returns the LDAP configuration to use."""
+        if not self.is_cluster_initialised:
+            return {}
+        if not self.is_ldap_charm_related:
+            logger.debug("LDAP is not enabled")
+            return {}
+
+        data = self.ldap.get_relation_data()
+        if data is None:
+            return {}
+
+        params = {
+            "ldapbasedn": data.base_dn,
+            "ldapbinddn": data.bind_dn,
+            "ldapbindpasswd": data.bind_password,
+            "ldaptls": data.starttls,
+            "ldapurl": data.urls[0],
+        }
+
+        # LDAP authentication parameters that are exclusive to
+        # one of the two supported modes (simple bind or search+bind)
+        # must be put at the very end of the parameters string
+        params.update({
+            "ldapsearchfilter": self.config.ldap_search_filter,
+        })
+
+        return params
 
 
 if __name__ == "__main__":

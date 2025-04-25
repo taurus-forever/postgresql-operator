@@ -29,6 +29,8 @@ class CharmConfig(BaseConfigModel):
     instance_max_locks_per_transaction: int | None
     instance_password_encryption: str | None
     instance_synchronize_seqscans: bool | None
+    ldap_map: str | None
+    ldap_search_filter: str | None
     logging_client_min_messages: str | None
     logging_log_connections: bool | None
     logging_log_disconnections: bool | None
@@ -165,6 +167,7 @@ class CharmConfig(BaseConfigModel):
     storage_default_table_access_method: str | None
     storage_gin_pending_list_limit: int | None
     storage_old_snapshot_threshold: int | None
+    system_users: str | None
     vacuum_autovacuum_analyze_scale_factor: float | None
     vacuum_autovacuum_analyze_threshold: int | None
     vacuum_autovacuum_freeze_max_age: int | None

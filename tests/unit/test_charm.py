@@ -13,7 +13,6 @@ from charms.operator_libs_linux.v2 import snap
 from charms.postgresql_k8s.v0.postgresql import (
     PostgreSQLCreateUserError,
     PostgreSQLEnableDisableExtensionError,
-    PostgreSQLUpdateUserPasswordError,
 )
 from ops import Unit
 from ops.framework import EventBase
@@ -41,7 +40,13 @@ from cluster import (
     SwitchoverFailedError,
     SwitchoverNotSyncError,
 )
-from constants import PEER, POSTGRESQL_SNAP_NAME, SECRET_INTERNAL_LABEL, SNAP_PACKAGES
+from constants import (
+    PEER,
+    POSTGRESQL_SNAP_NAME,
+    SECRET_INTERNAL_LABEL,
+    SNAP_PACKAGES,
+    UPDATE_CERTS_BIN_PATH,
+)
 
 CREATE_CLUSTER_CONF_PATH = "/etc/postgresql-common/createcluster.d/pgcharm.conf"
 
@@ -86,9 +91,9 @@ def test_on_install(harness):
         pg_snap.alias.assert_any_call("patronictl")
 
         assert _check_call.call_count == 3
-        _check_call.assert_any_call("mkdir -p /home/snap_daemon".split())
-        _check_call.assert_any_call("chown snap_daemon:snap_daemon /home/snap_daemon".split())
-        _check_call.assert_any_call("usermod -d /home/snap_daemon snap_daemon".split())
+        _check_call.assert_any_call(["mkdir", "-p", "/home/snap_daemon"])
+        _check_call.assert_any_call(["chown", "snap_daemon:snap_daemon", "/home/snap_daemon"])
+        _check_call.assert_any_call(["usermod", "-d", "/home/snap_daemon", "snap_daemon"])
 
         # Assert the status set by the event handler.
         assert isinstance(harness.model.unit.status, WaitingStatus)
@@ -774,102 +779,6 @@ def test_on_start_after_blocked_state(harness):
         assert harness.model.unit.status == initial_status
 
 
-def test_on_get_password(harness):
-    with patch("charm.PostgresqlOperatorCharm.update_config"):
-        rel_id = harness.model.get_relation(PEER).id
-        # Create a mock event and set passwords in peer relation data.
-        harness.set_leader(True)
-        mock_event = MagicMock(params={})
-        harness.update_relation_data(
-            rel_id,
-            harness.charm.app.name,
-            {
-                "operator-password": "test-password",
-                "replication-password": "replication-test-password",
-            },
-        )
-
-        # Test providing an invalid username.
-        mock_event.params["username"] = "user"
-        harness.charm._on_get_password(mock_event)
-        mock_event.fail.assert_called_once()
-        mock_event.set_results.assert_not_called()
-
-        # Test without providing the username option.
-        mock_event.reset_mock()
-        del mock_event.params["username"]
-        harness.charm._on_get_password(mock_event)
-        mock_event.set_results.assert_called_once_with({"password": "test-password"})
-
-        # Also test providing the username option.
-        mock_event.reset_mock()
-        mock_event.params["username"] = "replication"
-        harness.charm._on_get_password(mock_event)
-        mock_event.set_results.assert_called_once_with({"password": "replication-test-password"})
-
-
-def test_on_set_password(harness):
-    with (
-        patch("charm.PostgresqlOperatorCharm.update_config"),
-        patch("charm.PostgresqlOperatorCharm.set_secret") as _set_secret,
-        patch("charm.PostgresqlOperatorCharm.postgresql") as _postgresql,
-        patch("charm.Patroni.are_all_members_ready") as _are_all_members_ready,
-        patch("charm.PostgresqlOperatorCharm._on_leader_elected"),
-    ):
-        # Create a mock event.
-        mock_event = MagicMock(params={})
-
-        # Set some values for the other mocks.
-        _are_all_members_ready.side_effect = [False, True, True, True, True]
-        _postgresql.update_user_password = PropertyMock(
-            side_effect=[PostgreSQLUpdateUserPasswordError, None, None, None]
-        )
-
-        # Test trying to set a password through a non leader unit.
-        harness.charm._on_set_password(mock_event)
-        mock_event.fail.assert_called_once()
-        _set_secret.assert_not_called()
-
-        # Test providing an invalid username.
-        harness.set_leader()
-        mock_event.reset_mock()
-        mock_event.params["username"] = "user"
-        harness.charm._on_set_password(mock_event)
-        mock_event.fail.assert_called_once()
-        _set_secret.assert_not_called()
-
-        # Test without providing the username option but without all cluster members ready.
-        mock_event.reset_mock()
-        del mock_event.params["username"]
-        harness.charm._on_set_password(mock_event)
-        mock_event.fail.assert_called_once()
-        _set_secret.assert_not_called()
-
-        # Test for an error updating when updating the user password in the database.
-        mock_event.reset_mock()
-        harness.charm._on_set_password(mock_event)
-        mock_event.fail.assert_called_once()
-        _set_secret.assert_not_called()
-
-        # Test without providing the username option.
-        harness.charm._on_set_password(mock_event)
-        assert _set_secret.call_args_list[0][0][1] == "operator-password"
-
-        # Also test providing the username option.
-        _set_secret.reset_mock()
-        mock_event.params["username"] = "replication"
-        harness.charm._on_set_password(mock_event)
-        assert _set_secret.call_args_list[0][0][1] == "replication-password"
-
-        # And test providing both the username and password options.
-        _set_secret.reset_mock()
-        mock_event.params["password"] = "replication-test-password"
-        harness.charm._on_set_password(mock_event)
-        _set_secret.assert_called_once_with(
-            "app", "replication-password", "replication-test-password"
-        )
-
-
 def test_on_update_status(harness):
     with (
         patch("charm.ClusterTopologyObserver.start_observer") as _start_observer,
@@ -1231,10 +1140,17 @@ def test_restart(harness):
 def test_update_config(harness):
     with (
         patch("subprocess.check_output", return_value=b"C"),
+        patch("charm.snap_refreshed", return_value=True),
         patch("charm.snap.SnapCache"),
         patch(
             "charm.PostgresqlOperatorCharm._handle_postgresql_restart_need"
         ) as _handle_postgresql_restart_need,
+        patch(
+            "charm.PostgresqlOperatorCharm._restart_metrics_service"
+        ) as _restart_metrics_service,
+        patch(
+            "charm.PostgresqlOperatorCharm._restart_ldap_sync_service"
+        ) as _restart_ldap_sync_service,
         patch("charm.Patroni.bulk_update_parameters_controller_by_patroni"),
         patch("charm.Patroni.member_started", new_callable=PropertyMock) as _member_started,
         patch(
@@ -1262,6 +1178,7 @@ def test_update_config(harness):
         _render_patroni_yml_file.assert_called_once_with(
             connectivity=True,
             is_creating_backup=False,
+            enable_ldap=False,
             enable_tls=False,
             backup_id=None,
             stanza=None,
@@ -1273,10 +1190,14 @@ def test_update_config(harness):
             no_peers=False,
         )
         _handle_postgresql_restart_need.assert_called_once_with(False)
+        _restart_ldap_sync_service.assert_called_once()
+        _restart_metrics_service.assert_called_once()
         assert "tls" not in harness.get_relation_data(rel_id, harness.charm.unit.name)
 
         # Test with TLS files available.
         _handle_postgresql_restart_need.reset_mock()
+        _restart_ldap_sync_service.reset_mock()
+        _restart_metrics_service.reset_mock()
         harness.update_relation_data(
             rel_id, harness.charm.unit.name, {"tls": ""}
         )  # Mock some data in the relation to test that it change.
@@ -1286,6 +1207,7 @@ def test_update_config(harness):
         _render_patroni_yml_file.assert_called_once_with(
             connectivity=True,
             is_creating_backup=False,
+            enable_ldap=False,
             enable_tls=True,
             backup_id=None,
             stanza=None,
@@ -1297,6 +1219,8 @@ def test_update_config(harness):
             no_peers=False,
         )
         _handle_postgresql_restart_need.assert_called_once()
+        _restart_ldap_sync_service.assert_called_once()
+        _restart_metrics_service.assert_called_once()
         assert "tls" not in harness.get_relation_data(
             rel_id, harness.charm.unit.name
         )  # The "tls" flag is set in handle_postgresql_restart_need.
@@ -1306,6 +1230,8 @@ def test_update_config(harness):
             rel_id, harness.charm.unit.name, {"tls": ""}
         )  # Mock some data in the relation to test that it change.
         _handle_postgresql_restart_need.reset_mock()
+        _restart_ldap_sync_service.reset_mock()
+        _restart_metrics_service.reset_mock()
         harness.charm.update_config()
         _handle_postgresql_restart_need.assert_not_called()
         assert harness.get_relation_data(rel_id, harness.charm.unit.name)["tls"] == "enabled"
@@ -1317,6 +1243,8 @@ def test_update_config(harness):
         _is_tls_enabled.return_value = False
         harness.charm.update_config()
         _handle_postgresql_restart_need.assert_not_called()
+        _restart_ldap_sync_service.assert_not_called()
+        _restart_metrics_service.assert_not_called()
         assert "tls" not in harness.get_relation_data(rel_id, harness.charm.unit.name)
 
 
@@ -1388,6 +1316,7 @@ def test_validate_config_options(harness):
     ):
         _charm_lib.return_value.get_postgresql_text_search_configs.return_value = []
         _charm_lib.return_value.validate_date_style.return_value = False
+        _charm_lib.return_value.validate_group_map.return_value = False
         _charm_lib.return_value.get_postgresql_timezones.return_value = []
 
         # Test instance_default_text_search_config exception
@@ -1405,6 +1334,17 @@ def test_validate_config_options(harness):
         _charm_lib.return_value.get_postgresql_text_search_configs.return_value = [
             "pg_catalog.test"
         ]
+
+        # Test ldap_map exception
+        with harness.hooks_disabled():
+            harness.update_config({"ldap_map": "ldap_group="})
+
+        with pytest.raises(ValueError) as e:
+            harness.charm._validate_config_options()
+        assert str(e.value) == "ldap_map config option has an invalid value"
+
+        _charm_lib.return_value.validate_group_map.assert_called_once_with("ldap_group=")
+        _charm_lib.return_value.validate_group_map.return_value = True
 
         # Test request_date_style exception
         with harness.hooks_disabled():
@@ -1734,6 +1674,42 @@ def test_push_tls_files_to_workload(harness):
             assert _render_file.call_count == 2
 
 
+def test_push_ca_file_into_workload(harness):
+    with (
+        patch("charm.PostgresqlOperatorCharm.update_config") as _update_config,
+        patch("pathlib.Path.write_text") as _write_text,
+        patch("subprocess.check_call") as _check_call,
+    ):
+        harness.charm.set_secret("unit", "ca-app", "test-ca")
+
+        assert harness.charm.push_ca_file_into_workload("ca-app")
+        _write_text.assert_called_once()
+        _check_call.assert_called_once_with([UPDATE_CERTS_BIN_PATH])
+        _update_config.assert_called_once()
+
+
+def test_clean_ca_file_from_workload(harness):
+    with (
+        patch("charm.PostgresqlOperatorCharm.update_config") as _update_config,
+        patch("pathlib.Path.write_text") as _write_text,
+        patch("pathlib.Path.unlink") as _unlink,
+        patch("subprocess.check_call") as _check_call,
+    ):
+        harness.charm.set_secret("unit", "ca-app", "test-ca")
+
+        assert harness.charm.push_ca_file_into_workload("ca-app")
+        _write_text.assert_called_once()
+        _check_call.assert_called_once_with([UPDATE_CERTS_BIN_PATH])
+        _update_config.assert_called_once()
+
+        _check_call.reset_mock()
+        _update_config.reset_mock()
+
+        assert harness.charm.clean_ca_file_from_workload("ca-app")
+        _unlink.assert_called_once()
+        _check_call.assert_called_once_with([UPDATE_CERTS_BIN_PATH])
+
+
 def test_is_workload_running(harness):
     with patch("charm.snap.SnapCache") as _snap_cache:
         pg_snap = _snap_cache.return_value[POSTGRESQL_SNAP_NAME]
@@ -2001,35 +1977,6 @@ def test_scope_obj(harness):
     assert harness.charm._scope_obj("app") == harness.charm.framework.model.app
     assert harness.charm._scope_obj("unit") == harness.charm.framework.model.unit
     assert harness.charm._scope_obj("test") is None
-
-
-def test_on_get_password_secrets(harness):
-    with (
-        patch("charm.PostgresqlOperatorCharm._on_leader_elected"),
-    ):
-        # Create a mock event and set passwords in peer relation data.
-        harness.set_leader()
-        mock_event = MagicMock(params={})
-        harness.charm.set_secret("app", "operator-password", "test-password")
-        harness.charm.set_secret("app", "replication-password", "replication-test-password")
-
-        # Test providing an invalid username.
-        mock_event.params["username"] = "user"
-        harness.charm._on_get_password(mock_event)
-        mock_event.fail.assert_called_once()
-        mock_event.set_results.assert_not_called()
-
-        # Test without providing the username option.
-        mock_event.reset_mock()
-        del mock_event.params["username"]
-        harness.charm._on_get_password(mock_event)
-        mock_event.set_results.assert_called_once_with({"password": "test-password"})
-
-        # Also test providing the username option.
-        mock_event.reset_mock()
-        mock_event.params["username"] = "replication"
-        harness.charm._on_get_password(mock_event)
-        mock_event.set_results.assert_called_once_with({"password": "replication-test-password"})
 
 
 @pytest.mark.parametrize("scope,field", [("app", "operator-password"), ("unit", "csr")])
@@ -2674,3 +2621,35 @@ def test_on_promote_to_primary(harness):
         harness.charm._on_promote_to_primary(event)
         _raft_reinitialisation.assert_called_once_with()
         assert harness.charm.unit_peer_data["raft_candidate"] == "True"
+
+
+def test_get_ldap_parameters(harness):
+    with (
+        patch("charm.PostgreSQLLDAP.get_relation_data") as _get_relation_data,
+        patch(
+            target="charm.PostgresqlOperatorCharm.is_cluster_initialised",
+            new_callable=PropertyMock,
+            return_value=True,
+        ) as _cluster_initialised,
+    ):
+        with harness.hooks_disabled():
+            harness.update_relation_data(
+                harness.model.get_relation(PEER).id,
+                harness.charm.app.name,
+                {"ldap_enabled": "False"},
+            )
+
+        harness.charm.get_ldap_parameters()
+        _get_relation_data.assert_not_called()
+        _get_relation_data.reset_mock()
+
+        with harness.hooks_disabled():
+            harness.update_relation_data(
+                harness.model.get_relation(PEER).id,
+                harness.charm.app.name,
+                {"ldap_enabled": "True"},
+            )
+
+        harness.charm.get_ldap_parameters()
+        _get_relation_data.assert_called_once()
+        _get_relation_data.reset_mock()

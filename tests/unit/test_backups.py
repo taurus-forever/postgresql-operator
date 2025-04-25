@@ -507,7 +507,7 @@ def test_execute_command(harness):
         patch("pwd.getpwnam") as _getpwnam,
     ):
         # Test when the command fails.
-        command = "rm -r /var/snap/charmed-postgresql/common/data".split()
+        command = ["rm", "-r", "/var/snap/charmed-postgresql/common/data"]
         _run.return_value = CompletedProcess(command, 1, b"", b"fake stderr")
         assert harness.charm.backup._execute_command(command) == (1, "", "fake stderr")
         _run.assert_called_once_with(

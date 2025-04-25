@@ -53,6 +53,8 @@ POSTGRESQL_CONF_PATH = f"{SNAP_CONF_PATH}/postgresql"
 POSTGRESQL_DATA_PATH = SNAP_DATA_PATH
 POSTGRESQL_LOGS_PATH = f"{SNAP_LOGS_PATH}/postgresql"
 
+UPDATE_CERTS_BIN_PATH = "/usr/sbin/update-ca-certificates"
+
 PGBACKREST_CONFIGURATION_FILE = f"--config={PGBACKREST_CONF_PATH}/pgbackrest.conf"
 
 METRICS_PORT = "9187"
@@ -66,6 +68,7 @@ RAFT_PASSWORD_KEY = "raft-password"  # noqa: S105
 PATRONI_PASSWORD_KEY = "patroni-password"  # noqa: S105
 SECRET_INTERNAL_LABEL = "internal-secret"  # noqa: S105
 SECRET_DELETED_LABEL = "None"  # noqa: S105
+SYSTEM_USERS_PASSWORD_CONFIG = "system-users"  # noqa: S105
 
 APP_SCOPE = "app"
 UNIT_SCOPE = "unit"

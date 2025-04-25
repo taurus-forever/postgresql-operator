@@ -60,7 +60,9 @@ async def test_tls_enabled(ops_test: OpsTest) -> None:
         )
 
         # Relate it to the PostgreSQL to enable TLS.
-        await ops_test.model.relate(DATABASE_APP_NAME, tls_certificates_app_name)
+        await ops_test.model.relate(
+            f"{DATABASE_APP_NAME}:certificates", f"{tls_certificates_app_name}:certificates"
+        )
         await ops_test.model.wait_for_idle(status="active", timeout=1500, raise_on_error=False)
 
         # Wait for all units enabling TLS.
@@ -82,7 +84,7 @@ async def test_tls_enabled(ops_test: OpsTest) -> None:
         # Check if TLS enabled for replication
         assert await check_tls_replication(ops_test, primary, enabled=True)
 
-        patroni_password = await get_password(ops_test, primary, "patroni")
+        patroni_password = await get_password(ops_test, "patroni")
 
         # Enable additional logs on the PostgreSQL instance to check TLS
         # being used in a later step and make the fail-over to happens faster.
@@ -113,7 +115,7 @@ async def test_tls_enabled(ops_test: OpsTest) -> None:
 
                 # Check that the replica was promoted.
                 host = get_unit_address(ops_test, replica)
-                password = await get_password(ops_test, replica)
+                password = await get_password(ops_test)
                 with db_connect(host, password) as connection:
                     connection.autocommit = True
                     with connection.cursor() as cursor:
@@ -126,7 +128,7 @@ async def test_tls_enabled(ops_test: OpsTest) -> None:
         # Write some data to the initial primary (this causes a divergence
         # in the instances' timelines).
         host = get_unit_address(ops_test, primary)
-        password = await get_password(ops_test, primary)
+        password = await get_password(ops_test)
         with db_connect(host, password) as connection:
             connection.autocommit = True
             with connection.cursor() as cursor:

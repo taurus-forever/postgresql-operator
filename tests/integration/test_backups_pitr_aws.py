@@ -62,7 +62,9 @@ async def pitr_backup_operations(
     logger.info(
         "integrating self-signed-certificates with postgresql and waiting them to stabilize"
     )
-    await ops_test.model.relate(database_app_name, tls_certificates_app_name)
+    await ops_test.model.relate(
+        f"{database_app_name}:certificates", f"{tls_certificates_app_name}:certificates"
+    )
     async with ops_test.fast_forward(fast_interval="60s"):
         await ops_test.model.wait_for_idle(
             apps=[database_app_name, tls_certificates_app_name], status="active", timeout=1000
@@ -86,7 +88,7 @@ async def pitr_backup_operations(
         if unit.name != primary:
             replica = unit.name
             break
-    password = await get_password(ops_test, primary)
+    password = await get_password(ops_test, database_app_name=database_app_name)
     address = get_unit_address(ops_test, primary)
 
     logger.info("1: creating table")
