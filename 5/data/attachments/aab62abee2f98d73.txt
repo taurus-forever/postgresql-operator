@@ -1,0 +1,24 @@
+[32mINFO    [0m integration.ha_tests.test_self_healing:test_self_healing.py:399 checking whether the connectivity to the database is working
+[32mINFO    [0m integration.ha_tests.test_self_healing:test_self_healing.py:404 Cutting network for postgresql/2
+[32mINFO    [0m integration.ha_tests.test_self_healing:test_self_healing.py:410 checking for no connectivity between postgresql/2 and postgresql/3
+[32mINFO    [0m integration.ha_tests.test_self_healing:test_self_healing.py:410 checking for no connectivity between postgresql/2 and postgresql/0
+[32mINFO    [0m integration.ha_tests.test_self_healing:test_self_healing.py:417 checking for no connectivity between postgresql/2 and the controller
+[32mINFO    [0m integration.ha_tests.test_self_healing:test_self_healing.py:424 checking whether the connectivity to the database is not working
+[32mINFO    [0m integration.ha_tests.test_self_healing:test_self_healing.py:430 checking whether writes are increasing
+[32mINFO    [0m integration.ha_tests.helpers:helpers.py:103 Initial writes {'testing.postgresql-0': 1636, 'testing.postgresql-3': 1636}
+[32mINFO    [0m integration.ha_tests.helpers:helpers.py:113 Retry writes {'testing.postgresql-0': 1775, 'testing.postgresql-3': 1775}
+[32mINFO    [0m integration.ha_tests.test_self_healing:test_self_healing.py:433 checking whether a new primary was elected
+[32mINFO    [0m integration.ha_tests.test_self_healing:test_self_healing.py:440 Restoring network for postgresql/2
+[32mINFO    [0m integration.ha_tests.test_self_healing:test_self_healing.py:445 waiting for cluster to become idle after updating member IP
+[32mINFO    [0m juju.model:__init__.py:3254 Waiting for model:
+  postgresql/0 [idle] active: 
+  postgresql/2 [idle] active: 
+  postgresql/3 [idle] active: Primary (degraded)
+[32mINFO    [0m juju.model:__init__.py:3254 Waiting for model:
+  postgresql/0 [executing] maintenance: reconfiguring cluster
+  postgresql/2 [idle] active: 
+  postgresql/3 [idle] active: Primary (degraded)
+[32mINFO    [0m juju.model:__init__.py:3254 Waiting for model:
+  postgresql/0 [idle] active: 
+[32mINFO    [0m integration.ha_tests.test_self_healing:test_self_healing.py:456 waiting for IP address to be updated on Juju unit
+[32mINFO    [0m integration.ha_tests.test_self_healing:test_self_healing.py:460 waiting for the database service to be ready on postgresql/2
