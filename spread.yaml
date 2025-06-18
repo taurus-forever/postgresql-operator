@@ -1,58 +1,67 @@
 project: postgresql-operator
+kill-timeout: 3h
+workers: 1
+
+environment:
+  CI: '$(HOST: echo $CI)'
+  CONCIERGE_JUJU_CHANNEL/juju36: 3.6/stable
+  CONCIERGE_JUJU_CHANNEL/juju29: 2.9/stable
+  PATH: $PATH:$(pipx environment --value PIPX_BIN_DIR)
+  AWS_ACCESS_KEY: '$(HOST: echo $AWS_ACCESS_KEY)'
+  AWS_SECRET_KEY: '$(HOST: echo $AWS_SECRET_KEY)'
+  GCP_ACCESS_KEY: '$(HOST: echo $GCP_ACCESS_KEY)'
+  GCP_SECRET_KEY: '$(HOST: echo $GCP_SECRET_KEY)'
+  UBUNTU_PRO_TOKEN: '$(HOST: echo $UBUNTU_PRO_TOKEN)'
+  LANDSCAPE_ACCOUNT_NAME: '$(HOST: echo $LANDSCAPE_ACCOUNT_NAME)'
+  LANDSCAPE_REGISTRATION_KEY: '$(HOST: echo $LANDSCAPE_REGISTRATION_KEY)'
 
 backends:
-  # Derived from https://github.com/jnsgruk/zinc-k8s-operator/blob/a21eae8399eb3b9df4ddb934b837af25ef831976/spread.yaml#L11
   lxd-vm:
     # TODO: remove after https://github.com/canonical/spread/pull/185 merged & in charmcraft
     type: adhoc
     allocate: |
-      hash=$(python3 -c "import hashlib; print(hashlib.sha256('$SPREAD_PASSWORD'.encode()).hexdigest()[:6])")
-      VM_NAME="${VM_NAME:-${SPREAD_SYSTEM//./-}-${hash}}"
-      DISK="${DISK:-20}"
+      CONTAINER_NAME="pg-${SPREAD_SYSTEM/./-}-${RANDOM}"
+      DISK="${DISK:-50}"
       CPU="${CPU:-4}"
       MEM="${MEM:-8}"
 
-      cloud_config="#cloud-config
-      ssh_pwauth: true
-      users:
-        - default
-        - name: runner
-          plain_text_passwd: $SPREAD_PASSWORD
-          lock_passwd: false
-          sudo: ALL=(ALL) NOPASSWD:ALL
-      "
-
       lxc launch --vm \
-        "${SPREAD_SYSTEM//-/:}" \
-        "${VM_NAME}" \
-        -c user.user-data="${cloud_config}" \
+        "${SPREAD_SYSTEM/-/:}" \
+        "${CONTAINER_NAME}" \
+        -c user.user-data="$(sed "s|SPREAD_PASSWORD|$SPREAD_PASSWORD|g" tests/spread/cloud-config.yaml)" \
         -c limits.cpu="${CPU}" \
         -c limits.memory="${MEM}GiB" \
         -d root,size="${DISK}GiB"
 
-      # Wait for the runner user
-      while ! lxc exec "${VM_NAME}" -- id -u runner &>/dev/null; do sleep 0.5; done
+      # Wait for the spread user
+      while ! lxc exec "${CONTAINER_NAME}" -- id -u spread &>/dev/null; do sleep 0.5; done
 
       # Set the instance address for spread
-      ADDRESS "$(lxc ls -f csv | grep "${VM_NAME}" | cut -d"," -f3 | cut -d" " -f1)"
+      ADDRESS "$(lxc ls -f csv | grep "${CONTAINER_NAME}" | cut -d"," -f3 | cut -d" " -f1)"
     discard: |
-      hash=$(python3 -c "import hashlib; print(hashlib.sha256('$SPREAD_PASSWORD'.encode()).hexdigest()[:6])")
-      VM_NAME="${VM_NAME:-${SPREAD_SYSTEM//./-}-${hash}}"
-      lxc delete --force "${VM_NAME}"
+      instance_name="$(lxc ls -f csv | grep $SPREAD_SYSTEM_ADDRESS | cut -f1 -d",")"
+      lxc delete -f "${instance_name}"
     environment:
       CONCIERGE_EXTRA_SNAPS: charmcraft
       CONCIERGE_EXTRA_DEBS: pipx
+
     systems:
       - ubuntu-24.04:
-          username: runner
+          username: spread
+          workers: 1
+
     prepare: |
-      systemctl disable --now unattended-upgrades.service
-      systemctl mask unattended-upgrades.service
+     snap refresh --hold
+     if systemctl is-enabled unattended-upgrades.service; then
+        systemctl stop unattended-upgrades.service
+        systemctl mask unattended-upgrades.service
+      fi
       pipx install charmcraftcache
-      cd "$SPREAD_PATH"
+      cd "${SPREAD_PATH}"
       charmcraftcache pack -v
+
     restore-each: |
-      cd "$SPREAD_PATH"
+      cd "${SPREAD_PATH}"
       # Revert python-libjuju version override
       git restore pyproject.toml poetry.lock
 
@@ -64,68 +73,22 @@ backends:
     restore: |
       rm -rf "$SPREAD_PATH"
 
-  github-ci:
-    type: adhoc
-    # Only run on CI
-    manual: true
-    # HACK: spread requires runners to be accessible via SSH
-    # Configure local sshd & instruct spread to connect to the same machine spread is running on
-    # (spread cannot provision GitHub Actions runners, so we provision a GitHub Actions runner for
-    # each spread job & select a single job when running spread)
-    # Derived from https://github.com/jnsgruk/zinc-k8s-operator/blob/a21eae8399eb3b9df4ddb934b837af25ef831976/spread.yaml#L47
-    allocate: |
-      sudo tee /etc/ssh/sshd_config.d/10-spread-github-ci.conf << 'EOF'
-      PasswordAuthentication yes
-      PermitEmptyPasswords yes
-      EOF
-
-      sudo passwd -d runner
-
-      ADDRESS localhost
-    # HACK: spread does not pass environment variables set on runner
-    # Manually pass specific environment variables
-    environment:
-      CI: '$(HOST: echo $CI)'
-      AWS_ACCESS_KEY: '$(HOST: echo $AWS_ACCESS_KEY)'
-      AWS_SECRET_KEY: '$(HOST: echo $AWS_SECRET_KEY)'
-      GCP_ACCESS_KEY: '$(HOST: echo $GCP_ACCESS_KEY)'
-      GCP_SECRET_KEY: '$(HOST: echo $GCP_SECRET_KEY)'
-      UBUNTU_PRO_TOKEN: '$(HOST: echo $UBUNTU_PRO_TOKEN)'
-      LANDSCAPE_ACCOUNT_NAME: '$(HOST: echo $LANDSCAPE_ACCOUNT_NAME)'
-      LANDSCAPE_REGISTRATION_KEY: '$(HOST: echo $LANDSCAPE_REGISTRATION_KEY)'
-    systems:
-      - ubuntu-24.04:
-          username: runner
-      - ubuntu-24.04-arm:
-          username: runner
-          variants:
-            - -juju29
-
 suites:
   tests/spread/:
     summary: Spread tests
 
 path: /root/spread_project
 
-kill-timeout: 3h
-environment:
-  PATH: $PATH:$(pipx environment --value PIPX_BIN_DIR)
-  CONCIERGE_JUJU_CHANNEL/juju36: 3.6/stable
-  CONCIERGE_JUJU_CHANNEL/juju29: 2.9/stable
 prepare: |
   snap refresh --hold
-  chown -R root:root "$SPREAD_PATH"
+  chown -R root:root "${SPREAD_PATH}"
   cd "$SPREAD_PATH"
   snap install --classic concierge
-
-  # Install charmcraft & pipx (on lxd-vm backend)
-  concierge prepare --trace
-
   pipx install tox poetry
+
 prepare-each: |
-  cd "$SPREAD_PATH"
-  if [[ $SPREAD_VARIANT == *"juju29"* ]]
-  then
+  cd "${SPREAD_PATH}"
+  if [[ ${SPREAD_VARIANT} == *"juju29"* ]]; then
     # Each version of python-libjuju is only compatible with one major Juju version
     # Override python-libjuju version pinned in poetry.lock
     poetry add --lock --group integration juju@^2
@@ -136,4 +99,3 @@ prepare-each: |
   # Unable to set constraint on all models because of Juju bug:
   # https://bugs.launchpad.net/juju/+bug/2065050
   juju set-model-constraints arch="$(dpkg --print-architecture)"
-# Only restore on lxd backend—no need to restore on CI
