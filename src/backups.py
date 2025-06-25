@@ -79,9 +79,7 @@ class PostgreSQLBackups(Object):
         self.framework.observe(
             self.s3_client.on.credentials_changed, self._on_s3_credential_changed
         )
-        # When the leader unit is being removed, s3_client.on.credentials_gone is performed on it (and only on it).
-        # After a new leader is elected, the S3 connection must be reinitialized.
-        self.framework.observe(self.charm.on.leader_elected, self._on_s3_credential_changed)
+        self.framework.observe(self.charm.on.leader_elected, self._on_leader_elected)
         self.framework.observe(self.s3_client.on.credentials_gone, self._on_s3_credential_gone)
         self.framework.observe(self.charm.on.create_backup_action, self._on_create_backup_action)
         self.framework.observe(self.charm.on.list_backups_action, self._on_list_backups_action)
@@ -749,6 +747,19 @@ class PostgreSQLBackups(Object):
                 f"Failed to contact pgBackRest TLS server on {self.charm.primary_endpoint} with error {stderr}"
             )
         return return_code == 0
+
+    def _on_leader_elected(self, event: LeaderElectedEvent) -> None:
+        """Handle the leader-elected event."""
+
+        # Don't try to init stanza on leader_elected
+        # because there are no primary and replicas yet.
+        if not self.is_cluster_initialised:
+            logger.debug("Early exit backup._on_leader_elected: Cluster not initialized")
+            return
+
+        # When the leader unit is being removed, s3_client.on.credentials_gone is performed on it (and only on it).
+        # After a new leader is elected, the S3 connection must be reinitialized.
+        self._on_s3_credential_changed_primary(event)
 
     def _credential_changed_checks(self, event: CredentialsChangedEvent) -> bool:
         if not self.charm.is_cluster_initialised or not self.charm.get_secret(
