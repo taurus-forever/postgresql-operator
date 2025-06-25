@@ -752,7 +752,7 @@ class PostgreSQLBackups(Object):
         """Handle the leader-elected event."""
         # Don't try to init stanza on leader_elected
         # because there are no primary and replicas yet.
-        if not self.is_cluster_initialised:
+        if not self.charm.is_cluster_initialised:
             logger.debug("Early exit backup._on_leader_elected: Cluster not initialized")
             return
 
