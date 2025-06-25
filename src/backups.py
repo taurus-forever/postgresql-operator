@@ -748,9 +748,8 @@ class PostgreSQLBackups(Object):
             )
         return return_code == 0
 
-    def _on_leader_elected(self, event: LeaderElectedEvent) -> None:
+    def _on_leader_elected(self, event: CredentialsChangedEvent) -> None:
         """Handle the leader-elected event."""
-
         # Don't try to init stanza on leader_elected
         # because there are no primary and replicas yet.
         if not self.is_cluster_initialised:
