@@ -1,0 +1,2 @@
+[32mINFO    [0m integration.test_backups_ceph:test_backups_ceph.py:49 Setting up TLS certificates
+[32mINFO    [0m integration.test_backups_ceph:test_backups_ceph.py:114 Setting up microceph
