@@ -1,0 +1,35 @@
+[32mINFO    [0m pytest_operator.plugin:plugin.py:937 Model status:
+
+Model    Controller     Cloud/Region         Version  SLA          Timestamp
+testing  concierge-lxd  localhost/localhost  3.6.11   unsupported  03:34:15Z
+
+App                  Version  Status   Scale  Charm                Channel      Rev  Exposed  Message
+postgresql           14.19    active       3  postgresql           14/edge      942  no       
+postgresql-test-app           blocked      1  postgresql-test-app  latest/edge  414  no       No database integration available
+
+Unit                    Workload  Agent  Machine  Public address  Ports     Message
+postgresql-test-app/0*  blocked   idle   3        10.226.27.89              No database integration available
+postgresql/0*           active    idle   0        10.226.27.32    5432/tcp  Primary
+postgresql/1            active    idle   1        10.226.27.46    5432/tcp  
+postgresql/2            active    idle   2        10.226.27.146   5432/tcp  
+
+Machine  State    Address        Inst id        Base          AZ             Message
+0        started  10.226.27.32   juju-c4bf2e-0  ubuntu@22.04  runnervmwhb2z  Running
+1        started  10.226.27.46   juju-c4bf2e-1  ubuntu@22.04  runnervmwhb2z  Running
+2        started  10.226.27.146  juju-c4bf2e-2  ubuntu@22.04  runnervmwhb2z  Running
+3        started  10.226.27.89   juju-c4bf2e-3  ubuntu@22.04  runnervmwhb2z  Running
+
+[32mINFO    [0m pytest_operator.plugin:plugin.py:943 Juju error logs:
+
+machine-0: 03:10:27 ERROR juju.worker.dependency "lxd-container-provisioner" manifold worker returned unexpected error: container types not yet available
+machine-0: 03:10:27 ERROR juju.worker.dependency "kvm-container-provisioner" manifold worker returned unexpected error: container types not yet available
+unit-postgresql-0: 03:11:43 ERROR unit.postgresql/0.juju-log Failed to list PostgreSQL database users: could not translate host name "None" to address: Temporary failure in name resolution
+
+machine-3: 03:12:17 ERROR juju.worker.dependency "lxd-container-provisioner" manifold worker returned unexpected error: container types not yet available
+machine-3: 03:12:17 ERROR juju.worker.dependency "kvm-container-provisioner" manifold worker returned unexpected error: container types not yet available
+machine-1: 03:12:29 ERROR juju.worker.dependency "lxd-container-provisioner" manifold worker returned unexpected error: container types not yet available
+machine-1: 03:12:29 ERROR juju.worker.dependency "kvm-container-provisioner" manifold worker returned unexpected error: container types not yet available
+machine-2: 03:12:45 ERROR juju.worker.dependency "kvm-container-provisioner" manifold worker returned unexpected error: container types not yet available
+machine-2: 03:12:45 ERROR juju.worker.dependency "lxd-container-provisioner" manifold worker returned unexpected error: container types not yet available
+
+[32mINFO    [0m pytest_operator.plugin:plugin.py:1025 Forgetting model main...
